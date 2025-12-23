@@ -1,0 +1,5 @@
+{
+  "name": "PGS Physics Visualizer",
+  "description": "An interactive demonstration of the Projected Gauss-Seidel algorithm used in physics engines for constraint solving, featuring real-time convergence graphs and AI-powered explanations.",
+  "requestFramePermissions": []
+}
