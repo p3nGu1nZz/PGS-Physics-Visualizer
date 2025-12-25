@@ -9,6 +9,16 @@ interface Props {
   spawnMode: 'dynamic' | 'static';
 }
 
+// Helper to parse Hex to RGB for gradient interpolation
+const hexToRgb = (hex: string) => {
+  const cleanHex = hex.replace('#', '');
+  const bigint = parseInt(cleanHex, 16);
+  return { r: (bigint >> 16) & 255, g: (bigint >> 8) & 255, b: bigint & 255 };
+};
+
+// Linear interpolation between two values
+const lerp = (start: number, end: number, t: number) => start * (1 - t) + end * t;
+
 const SimulationCanvas: React.FC<Props> = ({ state, setSimState, spawnMode }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [dragInfo, setDragInfo] = useState<{ id: number, startMousePos: Vec2, bodyStartPos: Vec2 } | null>(null);
@@ -88,99 +98,105 @@ const SimulationCanvas: React.FC<Props> = ({ state, setSimState, spawnMode }) =>
 
   // --- Rendering ---
 
-  const drawTrail = (ctx: CanvasRenderingContext2D, body: Body, color: string) => {
+  const drawTrail = (ctx: CanvasRenderingContext2D, body: Body, baseColorHex: string) => {
     if (body.trail.length < 2) return;
 
     const speed = vLen(body.vel);
-    const speedFactor = Math.min(speed / 20, 1); 
-    const isFast = speedFactor > 0.4;
+    // 0 to 1 ratio where 20 m/s is considered "max speed" for visualization
+    const speedRatio = Math.min(speed / 20, 1.0);
+    const isFast = speedRatio > 0.3;
+
+    // Convert base color to RGB
+    const baseRgb = hexToRgb(baseColorHex);
+    
+    // Target "Hot" Color (High velocity) -> Cyan or White depending on theme
+    // Let's go with a bright Cyan/White mix for that Cyberpunk overload feel
+    const hotRgb = { r: 200, g: 255, b: 255 }; 
 
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
 
-    // Particle Emission for high speed (Sparks)
+    // -- Glitch/Spark Effect for high speed --
     if (isFast) {
         const px = body.pos.x * PIXELS_PER_METER;
         const py = body.pos.y * PIXELS_PER_METER;
+        const sparkCount = Math.floor(speedRatio * 2); 
         
-        ctx.fillStyle = '#ffffff';
-        // Draw 1-3 random sparks per frame based on speed
-        const sparkCount = Math.floor(speedFactor * 3);
+        ctx.fillStyle = '#fcee0a'; // Cyberpunk Yellow Sparks
         for (let j = 0; j < sparkCount; j++) {
-            if (Math.random() > 0.3) {
+            if (Math.random() > 0.5) {
                 const angle = Math.random() * Math.PI * 2;
-                const dist = (body.radius * PIXELS_PER_METER) * (0.8 + Math.random() * 0.5);
+                const dist = (body.radius * PIXELS_PER_METER) * (1.0 + Math.random());
                 const sx = px + Math.cos(angle) * dist;
                 const sy = py + Math.sin(angle) * dist;
-                
-                ctx.globalAlpha = Math.random() * 0.9;
                 const size = 1 + Math.random() * 2;
+                ctx.globalAlpha = 0.8;
                 ctx.fillRect(sx, sy, size, size);
             }
         }
-        ctx.globalAlpha = 1.0;
     }
 
-    for (let i = 0; i < body.trail.length - 1; i++) {
+    // -- Gradient Trail Rendering --
+    // We draw segment by segment to interpolate color and alpha correctly along the curve
+    
+    const trailLen = body.trail.length;
+    const bodyRadiusPx = body.radius * PIXELS_PER_METER;
+
+    for (let i = 0; i < trailLen - 1; i++) {
         const p1 = body.trail[i];
         const p2 = body.trail[i+1];
         
-        // Trail Metrics
-        const trailProgress = i / body.trail.length; // 0 (newest) to 1 (oldest)
-        const fade = 1 - trailProgress; // 1 (newest) to 0 (oldest)
+        // Normalized position in trail (0 = tail/oldest, 1 = head/newest)
+        const t = i / (trailLen - 1);
         
-        // Digital Glitch/Noise Effect on the tail
+        // 1. Width Modulation
+        // Trail gets thinner towards the tail
+        // At high speeds, the trail becomes "sharper" (thinner core)
+        const taper = Math.pow(t, 2); 
+        const dynamicWidth = bodyRadiusPx * taper * (0.8 - (speedRatio * 0.4));
+        ctx.lineWidth = Math.max(0.5, dynamicWidth);
+
+        // 2. Color Interpolation (Velocity Based)
+        // Mix Base Color with Hot Color based on Speed AND Position in trail
+        // The "Head" of the trail reflects current speed. The "Tail" cools down.
+        const mixFactor = speedRatio * t; // Only the head gets really hot
+        
+        const r = Math.floor(lerp(baseRgb.r, hotRgb.r, mixFactor));
+        const g = Math.floor(lerp(baseRgb.g, hotRgb.g, mixFactor));
+        const b = Math.floor(lerp(baseRgb.b, hotRgb.b, mixFactor));
+
+        // 3. Alpha Modulation
+        // Fade out tail. 
+        const alpha = Math.max(0, t * (0.4 + speedRatio * 0.6));
+
+        // 4. Glitch Jitter
+        // Occasional offset for cyberpunk feel on the tail
         let jx = 0, jy = 0;
-        if (trailProgress > 0.5) {
-             const jitterAmount = (trailProgress - 0.5) * 6; // Increase jitter towards end
-             jx = (Math.random() - 0.5) * jitterAmount;
-             jy = (Math.random() - 0.5) * jitterAmount;
+        if (t < 0.5 && Math.random() < 0.1) {
+             jx = (Math.random() - 0.5) * 4;
+             jy = (Math.random() - 0.5) * 4;
         }
 
-        // Alpha Calculation
-        // Faster = higher base alpha
-        const alpha = Math.max(0, fade * (0.3 + speedFactor * 0.7));
+        ctx.strokeStyle = `rgba(${r},${g},${b},${alpha})`;
         
+        // 5. Dynamic Glow
+        // Only apply heavy glow to the newest segments to save performance and look cool
+        if (i > trailLen - 5) {
+            ctx.shadowBlur = (speedRatio * 20) + (t * 5);
+            ctx.shadowColor = `rgba(${r},${g},${b},1)`;
+        } else {
+            ctx.shadowBlur = 0;
+        }
+
         ctx.beginPath();
         ctx.moveTo((p1.x * PIXELS_PER_METER) + jx, (p1.y * PIXELS_PER_METER) + jy);
         ctx.lineTo((p2.x * PIXELS_PER_METER) + jx, (p2.y * PIXELS_PER_METER) + jy);
-        
-        // Width Modulation
-        // Base width is body radius.
-        // Taper: fades to 0 at the end.
-        // Speed Effect: At high speed, the trail core thins out (streamlined) but opacity increases.
-        // At low speed, it's fuller.
-        const baseWidth = (body.radius * PIXELS_PER_METER);
-        const taper = Math.pow(fade, 1.5); // Non-linear taper
-        const width = baseWidth * taper * (0.8 - (speedFactor * 0.3)); 
-        
-        ctx.lineWidth = Math.max(0.5, width);
-        
-        // Color & Glow
-        if (isFast && i < 6) {
-             // Hot White Core for fast movers near the head
-             ctx.strokeStyle = `rgba(255, 255, 255, ${alpha})`;
-             ctx.shadowColor = color;
-             ctx.shadowBlur = 10 + (speedFactor * 10);
-        } else {
-             // Standard Color
-             if (color.startsWith('#')) {
-                 ctx.strokeStyle = color;
-             } else {
-                 ctx.strokeStyle = color; // HSL fallback
-             }
-             ctx.globalAlpha = alpha;
-             ctx.shadowBlur = 0;
-             // Occasional segment glitch color shift
-             if (trailProgress > 0.7 && Math.random() > 0.9) {
-                 ctx.strokeStyle = '#ffffff';
-             }
-        }
-        
         ctx.stroke();
-        ctx.globalAlpha = 1.0; 
-        ctx.shadowBlur = 0;
     }
+
+    // Reset Context
+    ctx.shadowBlur = 0;
+    ctx.globalAlpha = 1.0;
   };
 
   const drawBody = (ctx: CanvasRenderingContext2D, b: Body, index: number) => {
@@ -220,7 +236,10 @@ const SimulationCanvas: React.FC<Props> = ({ state, setSimState, spawnMode }) =>
         ctx.fill();
         
         // Neon Glow
-        ctx.shadowBlur = 15;
+        const speed = vLen(b.vel);
+        const glowIntensity = Math.min(speed / 5, 1) * 20 + 10;
+        
+        ctx.shadowBlur = glowIntensity;
         ctx.shadowColor = color;
         ctx.strokeStyle = '#ffffff';
         ctx.lineWidth = 2;
